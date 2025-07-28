@@ -8,22 +8,66 @@ import {
   ResponsiveContainer,
 } from "recharts";
 
+// --- Custom XAxis Tick for Multi-line & Rotated Labels (shared by both tabs) ---
+const CustomXAxisTick = (props) => {
+  const { x, y, payload } = props;
+  const text = payload.value;
+  // Wrap label every 10 chars, try to break at spaces
+  const wrapText = (txt, maxLen = 10) => {
+    const words = txt.split(" ");
+    let lines = [];
+    let curr = "";
+    words.forEach(word => {
+      if ((curr + " " + word).trim().length > maxLen) {
+        if (curr) lines.push(curr);
+        curr = word;
+      } else {
+        curr = (curr + " " + word).trim();
+      }
+    });
+    if (curr) lines.push(curr);
+    return lines;
+  };
+  const lines = wrapText(text, 10);
+
+  return (
+    <g transform={`translate(${x},${y})`}>
+      <text
+        x={0}
+        y={0}
+        dy={16}
+        textAnchor="end"
+        fill="#ccc"
+        fontSize={12}
+        transform="rotate(-35)"
+      >
+        {lines.map((line, i) => (
+          <tspan key={i} x={0} dy={i === 0 ? 0 : 14}>
+            {line}
+          </tspan>
+        ))}
+      </text>
+    </g>
+  );
+};
+
 export default function App() {
   const API_BASE = "https://gpu-sizer-api-bqb6bnc8e0c8hfgm.northeurope-01.azurewebsites.net/";
 
   // Tabs
-  const tabs = ["Sizer", "Models", "GPUs"];
-  const [activeTab, setActiveTab] = useState("Sizer");
+  const tabs = ["Inference Sizer", "Models", "GPUs"];
+  const [activeTab, setActiveTab] = useState("Inference Sizer");
 
   // Shared data
   const [models, setModels] = useState([]);
   const [gpus, setGpus] = useState([]);
 
   // Sizer state
-  const [model, setModel] = useState("");
+  const [model, setModel] = useState(""); // Default: none selected
   const [modelDetails, setModelDetails] = useState(null);
   const [users, setUsers] = useState(1);
   const [latency, setLatency] = useState(1000);
+  const [sessionTokens, setSessionTokens] = useState(400);
   const [rec, setRec] = useState(null);
   const [error, setError] = useState("");
 
@@ -31,10 +75,7 @@ export default function App() {
   useEffect(() => {
     fetch(`${API_BASE}/models`)
       .then((r) => r.json())
-      .then((list) => {
-        setModels(list);
-        if (list.length) setModel(list[0].Model);
-      })
+      .then((list) => setModels(list))
       .catch(() => setError("Failed to load models"));
 
     fetch(`${API_BASE}/gpus`)
@@ -45,7 +86,11 @@ export default function App() {
 
   // Update model details & default latency
   useEffect(() => {
-    if (!model) return;
+    if (!model) {
+      setModelDetails(null);
+      setRec(null);
+      return;
+    }
     const details = models.find((m) => m.Model === model) || null;
     setModelDetails(details);
     if (details) setLatency(Math.round(details["Base Latency (s)"] * 1000));
@@ -55,11 +100,12 @@ export default function App() {
 
   // Refetch on users or latency change
   useEffect(() => {
-    if (activeTab === "Sizer" && model) fetchRecommendation();
+    if (activeTab === "Inference Sizer" && model) fetchRecommendation();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [users, latency]);
 
   const fetchRecommendation = async (overrideGpu) => {
+    if (!model) return;
     setError("");
     setRec(null);
     try {
@@ -92,9 +138,46 @@ export default function App() {
     });
   };
 
+  // Helper to get tokens/s from a GPU record
+  function getTokensPerSec(obj) {
+    return (
+      obj?.["Tokens/s"] ??
+      obj?.tokens_per_second ??
+      obj?.tokensPerSecond ??
+      null
+    );
+  }
+
+  // Helper: Find the "best" NVLink GPU (lowest VRAM with enough tokens/s * n)
+  function findNvlinkSolution(gpus, modelDetails, totalTokensPerSecond) {
+    const nvlinkGpus = gpus.filter(
+      (g) => g.NVLink === true || g.nvlink === true
+    );
+    nvlinkGpus.sort((a, b) => (a["VRAM (GB)"] ?? 9999) - (b["VRAM (GB)"] ?? 9999));
+    for (let gpu of nvlinkGpus) {
+      const tokensPerGpu = getTokensPerSec(gpu) || 1;
+      const vramPerGpu = gpu["VRAM (GB)"] || 1;
+      const numNeeded = Math.ceil(totalTokensPerSecond / tokensPerGpu);
+      if (vramPerGpu >= (modelDetails?.["VRAM Required (GB)"] || 0)) {
+        return {
+          ...gpu,
+          NVLinkCount: numNeeded,
+          TotalVRAM: numNeeded * vramPerGpu,
+          TotalTokens: numNeeded * tokensPerGpu,
+        };
+      }
+    }
+    return null;
+  }
+
+  // --- Calculate required tokens/sec
+  const totalTokensPerSecond = users * sessionTokens;
+  // --- Token Size (read-only, always 2 bytes for now)
+  const TOKEN_SIZE = 2;
+
   return (
     <div className="min-h-screen bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 p-6">
-      <h1 className="text-4xl font-bold mb-6">GPU Sizer</h1>
+      <h1 className="text-4xl font-bold mb-6">Model to GPU Sizing Toolkit</h1>
 
       {/* Tabs */}
       <div className="flex space-x-4 mb-6">
@@ -113,8 +196,8 @@ export default function App() {
         ))}
       </div>
 
-      {/* SIZER TAB */}
-      {activeTab === "Sizer" && (
+      {/* INFERENCE SIZER TAB */}
+      {activeTab === "Inference Sizer" && (
         <div className="space-y-6">
           {/* Model selector */}
           <label className="block">
@@ -124,6 +207,9 @@ export default function App() {
               value={model}
               onChange={(e) => setModel(e.target.value)}
             >
+              <option value="" disabled>
+                Please select a model
+              </option>
               {models.map((m) => (
                 <option key={m.Model} value={m.Model}>
                   {m.Model}
@@ -156,97 +242,191 @@ export default function App() {
             </div>
           )}
 
-          {/* Inputs */}
-          <div className="grid grid-cols-2 gap-4">
-            <label>
-              <span className="font-medium">Concurrent Sessions</span>
-              <input
-                type="number"
-                min="1"
-                className="mt-1 block w-full p-2 border rounded bg-white dark:bg-gray-800"
-                value={users}
-                onChange={(e) => setUsers(+e.target.value)}
-              />
-              <div className="text-xs mt-1 text-gray-500 dark:text-gray-400">
-                Adding more concurrent sessions adds more KVCache reservations and adds up the average number of tokens/seconds for a session. Adding more users automatically means you are asking more computational and memory resources from the GPU.
-              </div>
-            </label>
-            <label>
-              <span className="font-medium">First Time to Token Latency (ms)</span>
-              <div className="flex items-center space-x-2 mt-1">
-                <span className="font-mono text-sm">{latency} ms</span>
-              </div>
-              <input
-                type="range"
-                min={modelDetails ? Math.round(modelDetails["Base Latency (s)"] * 1000) : 1}
-                max={30000}
-                step={50}
-                value={latency}
-                onChange={(e) => setLatency(Number(e.target.value))}
-                className="w-full mt-2"
-                disabled={!modelDetails}
-              />
-              <div className="text-xs mt-1 text-gray-500 dark:text-gray-400">
-                The initial latency is the minimal achievable latency for a single session. Increasing users without increasing the first time to token latency will require more GPU cores and could ask for multiple GPUs if it exceeds a single one.
-              </div>
-            </label>
+          {/* --- Session/Token Parameters SECTION --- */}
+          <div>
+            <h2 className="text-xl font-semibold mb-2">Session/Token Parameters</h2>
+            <div className="bg-gray-100 dark:bg-gray-800 p-4 rounded grid grid-cols-1 md:grid-cols-2 gap-6">
+              {/* Row 1, Col 1 */}
+              <label>
+                <span className="font-medium">Concurrent Sessions</span>
+                <input
+                  type="number"
+                  min="1"
+                  disabled={!modelDetails}
+                  className="mt-1 block w-full p-2 border rounded bg-white dark:bg-gray-800"
+                  value={users}
+                  onChange={(e) => setUsers(+e.target.value)}
+                />
+                <div className="text-xs mt-1 text-gray-500 dark:text-gray-400">
+                  Adding more concurrent sessions adds more KVCache reservations and adds up the average number of tokens/seconds for a session. Adding more users automatically means you are asking more computational and memory resources from the GPU.
+                </div>
+              </label>
+              {/* Row 1, Col 2 */}
+              <label>
+                <span className="font-medium">First Time to Token Latency (ms)</span>
+                <div className="flex items-center space-x-2 mt-1">
+                  <span className="font-mono text-sm">{latency} ms</span>
+                </div>
+                <input
+                  type="range"
+                  min={modelDetails ? Math.round(modelDetails["Base Latency (s)"] * 1000) : 1}
+                  max={30000}
+                  step={50}
+                  disabled={!modelDetails}
+                  value={latency}
+                  onChange={(e) => setLatency(Number(e.target.value))}
+                  className="w-full mt-2"
+                />
+                <div className="text-xs mt-1 text-gray-500 dark:text-gray-400">
+                  The initial latency is the minimal achievable latency for a single session. Increasing users without increasing the first time to token latency will require more GPU cores and could ask for multiple GPUs if it exceeds a single one.
+                </div>
+              </label>
+              {/* Row 2, Col 1 */}
+              <label>
+                <span className="font-medium">Tokens per Second per Session</span>
+                <div className="flex items-center space-x-2 mt-1">
+                  <span className="font-mono text-sm">{sessionTokens} tokens/s</span>
+                </div>
+                <input
+                  type="range"
+                  min={1}
+                  max={6000}
+                  step={1}
+                  disabled={!modelDetails}
+                  value={sessionTokens}
+                  onChange={(e) => setSessionTokens(Number(e.target.value))}
+                  className="w-full mt-2"
+                />
+                <div className="text-xs mt-1 text-gray-500 dark:text-gray-400">
+                  This controls the average tokens per second generated by each concurrent session.
+                </div>
+              </label>
+              {/* Row 2, Col 2 */}
+              <label>
+                <span className="font-medium">Token Size</span>
+                <input
+                  className="mt-1 block w-full p-2 border rounded bg-white dark:bg-gray-800"
+                  value={`${TOKEN_SIZE} bytes`}
+                  readOnly
+                />
+                <div className="text-xs mt-1 text-gray-500 dark:text-gray-400">
+                  Token size is the memory size per token (e.g., 2 bytes for FP16).<br />
+                  Typical LLMs use 2 bytes/token, but this can vary.<br />
+                  A token usually represents ~4 characters of text.
+                </div>
+              </label>
+            </div>
           </div>
+          {/* --- END Session/Token Parameters --- */}
 
-          {/* Recommendation */}
-          <div className="bg-white dark:bg-gray-800 p-4 rounded shadow space-y-4">
-            <h2 className="text-2xl font-semibold">Recommendation</h2>
-            {error && <div className="text-red-500">{error}</div>}
-            {!error && rec == null && <div>Loading…</div>}
-            {!error && rec && !rec.recommended && <div>No GPU found.</div>}
-            {!error && rec && rec.recommended && (
-              <div className="space-y-2">
-                <div>
-                  <strong>GPU:</strong> {rec.recommended["GPU Type"]}
-                </div>
-                <div>
-                  <strong>Qty:</strong> {rec.recommended.Config}
-                </div>
-                <div>
-                  <strong>Total VRAM:</strong>{" "}
-                  {rec.recommended["Total VRAM (GB)"]} GB
-                </div>
-                <div>
-                  <strong>Tokens/s:</strong>{" "}
-                  {rec.recommended["Tokens/s"] ?? rec.recommended.tokens_per_second ?? "—"}
-                </div>
+          {/* --- GPU Sizing Estimate (2 Columns) --- */}
+          <h2 className="text-2xl font-semibold mb-4 mt-8">GPU Sizing Estimate</h2>
+          <div className="bg-white dark:bg-gray-800 p-4 rounded shadow">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+              {/* Left Column: Recommendation */}
+              <div>
+                <h3 className="text-xl font-semibold mb-2">Recommendation</h3>
+                {error && <div className="text-red-500">{error}</div>}
+                {!model && <div>Please select a model to see recommendations.</div>}
+                {!error && !model && <div />}
+                {!error && rec == null && model && <div>Loading…</div>}
+                {!error && rec && !rec.recommended && model && <div>No GPU found.</div>}
+                {!error && rec && rec.recommended && model && (
+                  <>
+                    {getTokensPerSec(rec.recommended) &&
+                    totalTokensPerSecond <= getTokensPerSec(rec.recommended) ? (
+                      <div className="space-y-2">
+                        <div>
+                          <strong>GPU:</strong> {rec.recommended["GPU Type"]}
+                        </div>
+                        <div>
+                          <strong>Qty:</strong> {rec.recommended.Config}
+                        </div>
+                        <div>
+                          <strong>Total VRAM:</strong>{" "}
+                          {rec.recommended["Total VRAM (GB)"]} GB
+                        </div>
+                        <div>
+                          <strong>Tokens/s:</strong>{" "}
+                          {getTokensPerSec(rec.recommended) ?? "—"}
+                        </div>
+                      </div>
+                    ) : (
+                      (() => {
+                        const nvlinkSol = findNvlinkSolution(
+                          gpus,
+                          modelDetails,
+                          totalTokensPerSecond
+                        );
+                        return nvlinkSol ? (
+                          <div className="space-y-2">
+                            <div>
+                              <strong>GPU (NVLink):</strong> {nvlinkSol["GPU Type"]}
+                            </div>
+                            <div>
+                              <strong>Qty (NVLink):</strong> {nvlinkSol.NVLinkCount}
+                            </div>
+                            <div>
+                              <strong>Total VRAM:</strong> {nvlinkSol.TotalVRAM} GB
+                            </div>
+                            <div>
+                              <strong>Total Tokens/s:</strong> {nvlinkSol.TotalTokens}
+                            </div>
+                            <div className="text-blue-500 text-sm">
+                              🚦 Requirement exceeds a single GPU, NVLink scaling recommended.
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="text-red-500">
+                            No NVLink-capable GPU found for your requirements!
+                          </div>
+                        );
+                      })()
+                    )}
+                  </>
+                )}
               </div>
-            )}
 
-            {/* Alternatives */}
-            {rec && rec.alternatives?.length > 0 && (
-              <>
-                <h3 className="mt-4 font-medium">Alternatives</h3>
-                <ul className="list-disc pl-6 space-y-1">
-                  {rec.alternatives.map((alt) => (
-                    <li key={`${alt["GPU Type"]}-${alt.Config}`}>
-                      <button
-                        className="text-blue-500 underline"
-                        onClick={() => swapAlt(alt)}
-                      >
-                        {alt["GPU Type"]} – {alt.Config} (
-                        {alt["Tokens/s"] ?? alt.tokens_per_second ?? "—"} Tokens/s)
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </>
-            )}
+              {/* Right Column: Alternatives */}
+              <div>
+                <h3 className="text-xl font-semibold mb-2">Alternatives</h3>
+                {rec && rec.alternatives?.length > 0 ? (
+                  <ul className="list-disc pl-6 space-y-1">
+                    {rec.alternatives.map((alt) => (
+                      <li key={`${alt["GPU Type"]}-${alt.Config}`}>
+                        <button
+                          className="text-blue-500 underline"
+                          onClick={() => swapAlt(alt)}
+                        >
+                          {alt["GPU Type"]} – {alt.Config} (
+                          {getTokensPerSec(alt) ?? "—"} Tokens/s)
+                        </button>
+                        {getTokensPerSec(alt) &&
+                          totalTokensPerSecond > getTokensPerSec(alt) && (
+                            <div className="text-red-500 text-xs ml-2">
+                              (Does not meet tokens/sec requirement)
+                            </div>
+                          )}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="text-gray-500">No alternatives available.</div>
+                )}
+              </div>
+            </div>
 
-            {/* Reasoning */}
+            {/* Reasoning below both columns */}
             {rec && rec.reasoning && (
               <>
-                <h3 className="mt-4 font-medium">Reasoning</h3>
+                <h3 className="mt-6 font-medium">Reasoning</h3>
                 <pre className="bg-gray-100 dark:bg-gray-700 p-2 rounded text-sm">
                   {rec.reasoning}
                 </pre>
               </>
             )}
           </div>
+          {/* --- END GPU Sizing Estimate --- */}
         </div>
       )}
 
@@ -254,10 +434,17 @@ export default function App() {
       {activeTab === "Models" && (
         <div className="space-y-6">
           <h2 className="text-2xl font-semibold">Model Repository</h2>
-          <div className="h-64 bg-white dark:bg-gray-800 p-4 rounded shadow">
+          <div className="h-80 bg-white dark:bg-gray-800 p-4 rounded shadow">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={models}>
-                <XAxis dataKey="Model" tick={{ fontSize: 12 }} />
+              <BarChart
+                data={models}
+                margin={{ top: 16, right: 16, left: 16, bottom: 70 }}
+              >
+                <XAxis
+                  dataKey="Model"
+                  interval={0}
+                  tick={<CustomXAxisTick />}
+                />
                 <YAxis />
                 <Tooltip />
                 <Bar
@@ -297,10 +484,17 @@ export default function App() {
       {activeTab === "GPUs" && (
         <div className="space-y-6">
           <h2 className="text-2xl font-semibold">GPU List & Performance</h2>
-          <div className="h-64 bg-white dark:bg-gray-800 p-4 rounded shadow">
+          <div className="h-80 bg-white dark:bg-gray-800 p-4 rounded shadow">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={gpus}>
-                <XAxis dataKey="GPU Type" tickLine={false} />
+              <BarChart
+                data={gpus}
+                margin={{ top: 16, right: 16, left: 16, bottom: 70 }}
+              >
+                <XAxis
+                  dataKey="GPU Type"
+                  interval={0}
+                  tick={<CustomXAxisTick />}
+                />
                 <YAxis />
                 <Tooltip />
                 <Bar dataKey="Tokens/s" name="Tokens/sec" fill="#10b981" />
@@ -331,6 +525,14 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* Disclaimer Footer */}
+      <div className="text-xs text-gray-500 dark:text-gray-400 mt-8 text-center">
+        <hr className="my-4" />
+        Disclaimer: The GPU Sizer tool is provided for informational purposes only and does not guarantee the accuracy or suitability of its recommendations for your specific use case. 
+        Always validate sizing decisions with hardware vendors and/or subject matter experts. 
+        The author assumes no responsibility for any loss, damage, or consequences arising from the use of this tool.
+      </div>
     </div>
   );
 }
