@@ -159,7 +159,7 @@ export default function App() {
           {/* Inputs */}
           <div className="grid grid-cols-2 gap-4">
             <label>
-              <span className="font-medium">Users</span>
+              <span className="font-medium">Concurrent Sessions</span>
               <input
                 type="number"
                 min="1"
@@ -168,7 +168,7 @@ export default function App() {
                 onChange={(e) => setUsers(+e.target.value)}
               />
               <div className="text-xs mt-1 text-gray-500 dark:text-gray-400">
-                Adding more concurrent users (sessions) adds more KVCache reservations and adds up the average number of tokens/seconds for a session. Adding more users automatically means you are asking more computational and memory resources from the GPU.
+                Adding more concurrent sessions adds more KVCache reservations and adds up the average number of tokens/seconds for a session. Adding more users automatically means you are asking more computational and memory resources from the GPU.
               </div>
             </label>
             <label>
