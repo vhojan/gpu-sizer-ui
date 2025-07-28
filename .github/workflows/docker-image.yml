@@ -25,4 +25,4 @@ jobs:
         with:
           context: .
           push: true
-          tags: johanvanamersfoort/gpu-sizer-ui:latest
+          tags: vhojan/gpu-sizer-ui:latest
