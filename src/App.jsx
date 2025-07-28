@@ -283,7 +283,7 @@ export default function App() {
               </label>
               {/* Row 2, Col 1 */}
               <label>
-                <span className="font-medium">Tokens per Second per Session</span>
+                <span className="font-medium">Average Context Length</span>
                 <div className="flex items-center space-x-2 mt-1">
                   <span className="font-mono text-sm">{sessionTokens} tokens/s</span>
                 </div>
