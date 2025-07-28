@@ -285,7 +285,7 @@ export default function App() {
               <label>
                 <span className="font-medium">Average Context Length</span>
                 <div className="flex items-center space-x-2 mt-1">
-                  <span className="font-mono text-sm">{sessionTokens} tokens/s</span>
+                  <span className="font-mono text-sm">{sessionTokens} tokens</span>
                 </div>
                 <input
                   type="range"
@@ -404,7 +404,7 @@ export default function App() {
                         {getTokensPerSec(alt) &&
                           totalTokensPerSecond > getTokensPerSec(alt) && (
                             <div className="text-red-500 text-xs ml-2">
-                              (Does not meet tokens/sec requirement)
+                              (Does not meet context length requirement)
                             </div>
                           )}
                       </li>
