@@ -149,7 +149,7 @@ export default function App() {
                   {modelDetails["VRAM Required (GB)"]} GB
                 </div>
                 <div>
-                  <strong>Suggested KVCache with FP16 Quantization:</strong>{" "}
+                  <strong>Suggested KVCache with FP16 Precision:</strong>{" "}
                   {modelDetails["KV Cache (GB per user)"]} GB/user
                 </div>
               </div>
