@@ -196,7 +196,7 @@ export default function App() {
   return (
     <div className="min-h-screen bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 p-6">
       <h1 className="text-4xl font-bold mb-6">Model to GPU Sizing Toolkit</h1>
-
+      <p className="text-sm text-gray-400 mb-6">Public Beta v0.7.1 — results are indicative only</p>
       {/* Tabs */}
       <div className="flex space-x-4 mb-6">
         {tabs.map((t) => (
