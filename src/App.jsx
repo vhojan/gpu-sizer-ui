@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import ModelSelector from "./components/ModelSelector";
 import ModelDetails from "./components/ModelDetails";
 import SessionTokenParams from "./components/SessionTokenParams";
@@ -9,7 +9,7 @@ import GpusChart from "./components/GpusChart";
 import GpusTable from "./components/GpusTable";
 import Footer from "./components/Footer";
 
-// --- Utility for NVLink logic ---
+/* -------------------- small helpers -------------------- */
 function getTokensPerSec(obj) {
   return (
     obj?.["Tokens/s"] ??
@@ -19,9 +19,7 @@ function getTokensPerSec(obj) {
   );
 }
 function findNvlinkSolution(gpus, modelDetails, totalTokensPerSecond) {
-  const nvlinkGpus = gpus.filter(
-    (g) => g.NVLink === true || g.nvlink === true
-  );
+  const nvlinkGpus = gpus.filter((g) => g.NVLink === true || g.nvlink === true);
   nvlinkGpus.sort((a, b) => (a["VRAM (GB)"] ?? 9999) - (b["VRAM (GB)"] ?? 9999));
   for (let gpu of nvlinkGpus) {
     const tokensPerGpu = getTokensPerSec(gpu) || 1;
@@ -39,22 +37,38 @@ function findNvlinkSolution(gpus, modelDetails, totalTokensPerSecond) {
   return null;
 }
 
+/* -------------------- constants -------------------- */
+const API_BASE =
+  "https://gpu-sizer-api-bqb6bnc8e0c8hfgm.northeurope-01.azurewebsites.net";
+const DEFAULT_USERS = 1;
+const DEFAULT_LATENCY_MS = 1000;
+const DEFAULT_SESSION_TOKENS = 400;
+const TOKEN_SIZE_BYTES = 2;
+
+/* ======================== APP ======================== */
 export default function App() {
-  const API_BASE = "https://gpu-sizer-api-bqb6bnc8e0c8hfgm.northeurope-01.azurewebsites.net";
-  const tabs = ["Inference Sizer", "Models", "GPUs"];
+  //const tabs = ["Inference Sizer", "Models", "GPUs"];
+  const tabs = ["Inference Sizer", "GPUs"];
+
   const [activeTab, setActiveTab] = useState("Inference Sizer");
+
   const [models, setModels] = useState([]);
   const [gpus, setGpus] = useState([]);
+
   const [model, setModel] = useState("");
   const [modelDetails, setModelDetails] = useState(null);
-  const [users, setUsers] = useState(1);
-  const [latency, setLatency] = useState(1000);
-  const [sessionTokens, setSessionTokens] = useState(400);
+
+  const [users, setUsers] = useState(DEFAULT_USERS);
+  const [latency, setLatency] = useState(DEFAULT_LATENCY_MS);
+  const [sessionTokens, setSessionTokens] = useState(DEFAULT_SESSION_TOKENS);
+
   const [rec, setRec] = useState(null);
   const [error, setError] = useState("");
   const [kvCacheOverride, setKvCacheOverride] = useState(null);
 
-  // Fetch models and GPUs on mount
+  const fetchAbortRef = useRef(null);
+
+  /* ---------- bootstrap data ---------- */
   useEffect(() => {
     fetch(`${API_BASE}/models`)
       .then((r) => r.json())
@@ -67,45 +81,75 @@ export default function App() {
       .catch(() => setError("Failed to load GPUs"));
   }, []);
 
-  // When a model is selected, fetch details from backend and recalculate latency
+  /* ---------- when model text changes: reset UI to defaults, then fetch ---------- */
   useEffect(() => {
-    if (!model) {
-      setModelDetails(null);
-      setRec(null);
-      setKvCacheOverride(null);
-      return;
+    // Cancel any in-flight model fetch
+    if (fetchAbortRef.current) {
+      fetchAbortRef.current.abort();
     }
-    fetch(`${API_BASE}/models/${encodeURIComponent(model)}`)
-      .then((r) => {
-        if (!r.ok) throw new Error("Model details not found");
-        return r.json();
-      })
-      .then((details) => {
+
+    // Hard reset to defaults while user is typing/searching a new model
+    setModelDetails(null);
+    setRec(null);
+    setError("");
+    setKvCacheOverride(null);
+    setUsers(DEFAULT_USERS);
+    setLatency(DEFAULT_LATENCY_MS);
+    setSessionTokens(DEFAULT_SESSION_TOKENS);
+
+    if (!model) return; // nothing to fetch
+
+    const ctrl = new AbortController();
+    fetchAbortRef.current = ctrl;
+
+    const run = async () => {
+      try {
+        const res = await fetch(
+          `${API_BASE}/models/${encodeURIComponent(model)}`,
+          { signal: ctrl.signal }
+        );
+        if (!res.ok) throw new Error("Model details not found");
+        const details = await res.json();
+
+        // Only apply if still current (not aborted/switched)
+        if (ctrl.signal.aborted) return;
+
         setModelDetails(details);
-        setKvCacheOverride(null); // Reset override on model change
-        // Flexible: accept either API or DB field names
+        setKvCacheOverride(null);
+
+        // If API ships a base latency in seconds, map it to ms once
         const baseLatency =
           details.base_latency_s ??
-          details["Base Latency (s)"] ??
-          details.base_latency ??
-          details.baseLatency ??
+          details.first_token_latency_s ??
           null;
-        if (baseLatency) setLatency(Math.round(baseLatency * 1000));
-        fetchRecommendation(null, details, null); // trigger with initial details
-      })
-      .catch(() => setModelDetails(null));
+        if (baseLatency != null) {
+          setLatency(Math.round(Number(baseLatency) * 1000));
+        }
+
+        // Initial recommendation once details exist
+        fetchRecommendation(details, kvCacheOverride);
+      } catch (e) {
+        if (ctrl.signal.aborted) return;
+        // keep UI clean; no details -> sections stay hidden
+        setModelDetails(null);
+      }
+    };
+
+    run();
+
+    return () => ctrl.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [model]);
 
-  // Update recommendation if users, latency, or kvCacheOverride changes
+  /* ---------- update recommendation when params change ---------- */
   useEffect(() => {
-    if (activeTab === "Inference Sizer" && model && modelDetails) {
-      fetchRecommendation(null, modelDetails, kvCacheOverride);
-    }
+    if (activeTab !== "Inference Sizer") return;
+    if (!model || !modelDetails) return;
+    fetchRecommendation(modelDetails, kvCacheOverride);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [users, latency, kvCacheOverride]);
 
-  // If user changes tab, clear error/rec if leaving Inference Sizer
+  /* ---------- switching away clears rec/error ---------- */
   useEffect(() => {
     if (activeTab !== "Inference Sizer") {
       setRec(null);
@@ -113,50 +157,46 @@ export default function App() {
     }
   }, [activeTab]);
 
-  const fetchRecommendation = async (overrideGpu, detailsOverride, kvOverride) => {
-    if (!model) return;
-    setError("");
-    setRec(null);
+  async function fetchRecommendation(detailsOverride, kvOverride) {
     try {
+      setError("");
+      setRec(null);
       const url = new URL(`${API_BASE}/recommendation`);
       url.searchParams.set("model", model);
-      url.searchParams.set("users", users);
-      url.searchParams.set("latency", latency);
-      if (overrideGpu) url.searchParams.set("gpu", overrideGpu);
-      if (kvOverride) url.searchParams.set("kv_cache_override", kvOverride);
+      url.searchParams.set("users", String(users));
+      url.searchParams.set("latency", String(latency));
+      if (kvOverride != null) {
+        url.searchParams.set("kv_cache_override", String(kvOverride));
+      }
       const res = await fetch(url);
       if (!res.ok) throw new Error(await res.text());
       setRec(await res.json());
     } catch (e) {
-      setError(e.message);
+      setError(e.message || "Failed to fetch recommendation");
     }
-  };
+  }
 
-  const handleKvCacheOverride = (value) => {
+  function handleKvCacheOverride(value) {
     setKvCacheOverride(value);
-  };
+  }
 
-  const swapAlt = (alt) => {
+  function swapAlt(alt) {
     setRec((prev) => {
       if (!prev) return prev;
       const oldRec = prev.recommended;
       const newAlts = prev.alternatives
         .filter((a) => a["GPU Type"] !== alt["GPU Type"])
         .concat(oldRec);
-      return {
-        ...prev,
-        recommended: alt,
-        alternatives: newAlts,
-      };
+      return { ...prev, recommended: alt, alternatives: newAlts };
     });
-  };
+  }
 
   const totalTokensPerSecond = users * sessionTokens;
-  const TOKEN_SIZE = 2;
 
   return (
     <div className="min-h-screen bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 p-6">
       <h1 className="text-4xl font-bold mb-6">Model to GPU Sizing Toolkit</h1>
+
       {/* Tabs */}
       <div className="flex space-x-4 mb-6">
         {tabs.map((t) => (
@@ -174,48 +214,59 @@ export default function App() {
         ))}
       </div>
 
-      {/* --- INFERENCE SIZER TAB --- */}
+      {/* Inference Sizer */}
       {activeTab === "Inference Sizer" && (
         <div className="space-y-6">
           <ModelSelector value={model} onSelect={setModel} />
-          <ModelDetails
-            details={modelDetails}
-            onKvCacheOverride={handleKvCacheOverride}
-          />
-          <SessionTokenParams
-            users={users}
-            setUsers={setUsers}
-            latency={latency}
-            setLatency={setLatency}
-            sessionTokens={sessionTokens}
-            setSessionTokens={setSessionTokens}
-            modelDetails={modelDetails}
-            TOKEN_SIZE={TOKEN_SIZE}
-          />
-          <GpuSizingEstimate
-            error={error}
-            model={model}
-            rec={rec}
-            gpus={gpus}
-            modelDetails={modelDetails}
-            totalTokensPerSecond={totalTokensPerSecond}
-            getTokensPerSec={getTokensPerSec}
-            findNvlinkSolution={findNvlinkSolution}
-            swapAlt={swapAlt}
-          />
+
+          {/* Render sections ONLY once modelDetails exists */}
+          {modelDetails && (
+            <>
+              <ModelDetails
+                details={modelDetails}
+                onKvCacheOverride={handleKvCacheOverride}
+                latencyMs={latency}
+                contextLen={sessionTokens}
+                tokenSizeBytes={TOKEN_SIZE_BYTES}
+              />
+
+              <SessionTokenParams
+                users={users}
+                setUsers={setUsers}
+                latency={latency}
+                setLatency={setLatency}
+                sessionTokens={sessionTokens}
+                setSessionTokens={setSessionTokens}
+                modelDetails={modelDetails}
+                TOKEN_SIZE={TOKEN_SIZE_BYTES}
+              />
+
+              <GpuSizingEstimate
+                error={error}
+                model={model}
+                rec={rec}
+                gpus={gpus}
+                modelDetails={modelDetails}
+                totalTokensPerSecond={totalTokensPerSecond}
+                getTokensPerSec={getTokensPerSec}
+                findNvlinkSolution={findNvlinkSolution}
+                swapAlt={swapAlt}
+              />
+            </>
+          )}
         </div>
       )}
 
-      {/* --- MODELS TAB --- */}
+      {/* Models tab */}
       {activeTab === "Models" && (
         <div className="space-y-6">
           <h2 className="text-2xl font-semibold">Model Repository</h2>
-          <ModelsChart models={models} />
-          <ModelsTable models={models} />
+          <ModelsChart models={models} apiBase={API_BASE} />
+          <ModelsTable models={models} apiBase={API_BASE} />
         </div>
       )}
 
-      {/* --- GPUS TAB --- */}
+      {/* GPUs tab */}
       {activeTab === "GPUs" && (
         <div className="space-y-6">
           <h2 className="text-2xl font-semibold">GPU List & Performance</h2>
